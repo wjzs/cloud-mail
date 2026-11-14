@@ -417,7 +417,7 @@ const emailService = {
 		ccEmail.forEach(address => takenAddress.add(address.toLowerCase()));
 		bccEmail = bccEmail.filter(address => !takenAddress.has(address.toLowerCase()));
 
-		const { resendTokens, r2Domain, send, domainList } = await settingService.query(c);
+		const { resendTokens, brevoTokens, r2Domain, send, domainList } = await settingService.query(c);
 
 		let { imageDataList, html } = await attService.toImageUrlHtml(c, content);
 
@@ -493,10 +493,12 @@ const emailService = {
 
 		const domain = emailUtils.getDomain(accountRow.email);
 		const resendToken = resendTokens[domain];
+		// Brevo 发件密钥（xkeysib- 开头），按发件账号的域名取
+		const brevoToken = (brevoTokens || {})[domain];
 		const useCloudflareEmail = !!c.env.email;
 
 		//如果接收方存在站外邮箱，又没有发信服务
-		if (!useCloudflareEmail && !resendToken && !allInternal) {
+		if (!useCloudflareEmail && !brevoToken && !resendToken && !allInternal) {
 			throw new BizError(t('noSendProvider'));
 		}
 
@@ -550,7 +552,7 @@ const emailService = {
 
 		// sendParams 用于渠道请求，saveParams 保留保存记录所需的账号、权限和附件数据。
 		const context = {
-			separate, allInternal, useCloudflareEmail, resendToken, sendParams,
+			separate, allInternal, useCloudflareEmail, resendToken, brevoToken, sendParams,
 			saveParams: {
 				accountId, userId, name, subject, text, html,
 				sendEmail: accountRow.email,
@@ -561,12 +563,14 @@ const emailService = {
 			}
 		};
 
-		// 全部站内收件人走本地投递；存在站外收件人时优先 CF，其次 Resend。
+		// 全部站内收件人走本地投递；存在站外收件人时优先 CF，其次 Brevo，最后 Resend。
 		let deliveries;
 		if (allInternal) {
 			deliveries = this.sendInternal(c, context);
 		} else if (useCloudflareEmail) {
 			deliveries = this.sendCloudflare(c, context);
+		} else if (brevoToken) {
+			deliveries = this.sendBrevo(c, context);
 		} else {
 			deliveries = this.sendResend(c, context);
 		}
@@ -672,6 +676,34 @@ const emailService = {
 			}));
 		}
 		yield { emails };
+	},
+
+	// Brevo 事务邮件 API 无批量接口，分开发送时逐人调用、逐人落库。
+	async *sendBrevo(c, { separate, brevoToken, sendParams, saveParams }) {
+		const recipientGroups = separate
+			? sendParams.receiveEmail.map(address => [address])
+			: [sendParams.receiveEmail];
+
+		for (const receiveEmail of recipientGroups) {
+			let result;
+			try {
+				result = await this.sendByBrevo(brevoToken, { ...sendParams, receiveEmail });
+			} catch (error) {
+				if (!separate) throw error;
+				// 分开发送遇到渠道错误即停止，已成功的记录由入口汇总。
+				yield { error: { message: error.message } };
+				return;
+			}
+			if (result.error) {
+				if (!separate) throw new BizError(result.error.message);
+				yield { error: result.error };
+				return;
+			}
+			const emailResult = await this.saveSentEmail(c, {
+				...saveParams, receiveEmail, providerId: result.data?.id
+			});
+			yield { emails: [emailResult] };
+		}
 	},
 
 	// 三个渠道共用的发件记录保存：恢复正文图片 URL、保存附件并更新发送计数。
@@ -826,6 +858,126 @@ const emailService = {
 		}
 
 		return await resend.emails.send(sendForm);
+	},
+
+	// Brevo 事务邮件接口：POST https://api.brevo.com/v3/smtp/email
+	// 文档：https://developers.brevo.com/reference/sendtransacemail
+	async sendByBrevo(brevoToken, params) {
+		const sendForm = {
+			sender: {
+				email: params.accountEmail,
+				name: params.name || params.accountEmail
+			},
+			to: params.receiveEmail.map(address => ({ email: address })),
+			subject: params.subject || ''
+		};
+
+		if (params.ccEmail.length > 0) {
+			sendForm.cc = params.ccEmail.map(address => ({ email: address }));
+		}
+
+		if (params.bccEmail.length > 0) {
+			sendForm.bcc = params.bccEmail.map(address => ({ email: address }));
+		}
+
+		if (params.html) {
+			sendForm.htmlContent = this.toBrevoHtml(params.html, params.attachments);
+		}
+
+		if (params.text) {
+			sendForm.textContent = params.text;
+		}
+
+		// Brevo 要求正文至少有一项
+		if (!sendForm.htmlContent && !sendForm.textContent) {
+			sendForm.textContent = ' ';
+		}
+
+		const attachments = await this.toBrevoAttachments(params.attachments);
+		if (attachments.length > 0) {
+			sendForm.attachment = attachments;
+		}
+
+		if (params.sendType === 'reply' && params.messageId) {
+			sendForm.headers = {
+				'in-reply-to': params.messageId,
+				'references': params.messageId
+			};
+		}
+
+		const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+			method: 'POST',
+			headers: {
+				'api-key': brevoToken,
+				'content-type': 'application/json',
+				accept: 'application/json'
+			},
+			body: JSON.stringify(sendForm)
+		});
+
+		const body = await response.json().catch(() => ({}));
+
+		if (!response.ok) {
+			// 401/403 多为 key 无效或域名未验证（Brevo 要求 sender 域名完成 DKIM 验证）
+			return {
+				error: {
+					message: body.message
+						? `Brevo: ${body.message}`
+						: `Brevo 发送失败 (HTTP ${response.status})`
+				}
+			};
+		}
+
+		return { data: { id: body.messageId } };
+	},
+
+	// Brevo 的 JSON 接口不支持 cid 内嵌图，正文里的 cid:xxx 改用 data URI 内联
+	toBrevoHtml(html, attachments = []) {
+		if (!html) {
+			return html;
+		}
+
+		let result = html;
+
+		for (const attachment of attachments) {
+			if (!attachment.contentId || !attachment.content || typeof attachment.content !== 'string') {
+				continue;
+			}
+
+			let content = attachment.content;
+			if (!content.startsWith('data:')) {
+				const mimeType = attachment.mimeType || attachment.contentType || 'image/png';
+				content = `data:${mimeType};base64,${content}`;
+			}
+
+			result = result.split(`cid:${attachment.contentId}`).join(content);
+		}
+
+		return result;
+	},
+
+	// Brevo 附件格式：{ content: base64, name: 文件名 }
+	async toBrevoAttachments(attachments = []) {
+		const result = [];
+
+		for (const attachment of attachments) {
+			// 内嵌图（contentId）已在 toBrevoHtml 里转成 data URI，不再作为附件重复发送
+			if (attachment.contentId) {
+				continue;
+			}
+
+			const content = await this.toAttachmentBase64(attachment);
+			if (!content) {
+				continue;
+			}
+
+			result.push({
+				content,
+				name: attachment.filename || attachment.name || 'attachment'
+			});
+		}
+
+		return result;
 	},
 
 	async toCloudflareAttachments(attachments) {

@@ -16,6 +16,7 @@ const settingService = {
 	async refresh(c) {
 		const settingRow = await orm(c).select().from(setting).get();
 		settingRow.resendTokens = JSON.parse(settingRow.resendTokens);
+		settingRow.brevoTokens = JSON.parse(settingRow.brevoTokens || '{}');
 		settingRow.r2Domain = '';
 		c.set('setting', settingRow);
 		await c.env.kv.put(KvConst.SETTING, JSON.stringify(settingRow));
@@ -85,6 +86,10 @@ const settingService = {
 			settingRow.resendTokens[key] = `${settingRow.resendTokens[key].slice(0, 12)}******`;
 		});
 
+		Object.keys(settingRow.brevoTokens || {}).forEach(key => {
+			settingRow.brevoTokens[key] = `${settingRow.brevoTokens[key].slice(0, 12)}******`;
+		});
+
 		settingRow.s3AccessKey = settingRow.s3AccessKey ? `${settingRow.s3AccessKey.slice(0, 12)}******` : null;
 		settingRow.s3SecretKey = settingRow.s3SecretKey ? `${settingRow.s3SecretKey.slice(0, 12)}******` : null;
 		settingRow.tgBotToken = settingRow.tgBotToken ? `${settingRow.tgBotToken.slice(0, 20)}******` : null;
@@ -117,6 +122,24 @@ const settingService = {
 		Object.keys(resendTokens).forEach(domain => {
 			if (!resendTokens[domain]) delete resendTokens[domain];
 		});
+
+		// Brevo 发件密钥（按域名配置）：与 resendTokens 同构，空值表示删除该域名
+		if (params.brevoTokens !== undefined) {
+			const brevoTokens = { ...(settingData.brevoTokens || {}) };
+			Object.keys(params.brevoTokens).forEach(domain => {
+				const value = params.brevoTokens[domain];
+				// 前端回传的脱敏值（含 ******）表示未修改，保留原值
+				if (typeof value === 'string' && value.includes('******')) {
+					return;
+				}
+				if (value) {
+					brevoTokens[domain] = value;
+				} else {
+					delete brevoTokens[domain];
+				}
+			});
+			params.brevoTokens = JSON.stringify(brevoTokens);
+		}
 
 		if (Array.isArray(params.emailPrefixFilter)) {
 			params.emailPrefixFilter = params.emailPrefixFilter + '';

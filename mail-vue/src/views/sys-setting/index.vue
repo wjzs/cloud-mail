@@ -189,6 +189,19 @@
                 </div>
               </div>
               <div class="setting-item">
+                <div><span>Brevo Token</span></div>
+                <div>
+                  <el-button class="opt-button" style="margin-top: 0" @click="showBrevoList = true" size="small"
+                             type="primary">
+                    <Icon icon="ic:round-list" width="18" height="18"/>
+                  </el-button>
+                  <el-button class="opt-button" style="margin-top: 0" @click="openBrevoForm" size="small"
+                             type="primary">
+                    <Icon icon="material-symbols:add-rounded" width="16" height="16"/>
+                  </el-button>
+                </div>
+              </div>
+              <div class="setting-item">
                 <div><span>{{ setting.hasCfEmail ? $t('cloudflareEmailSending') : $t('resendToken') }}</span></div>
                 <div v-if="setting.hasCfEmail">
                   <span>{{ $t('enabled') }}</span>
@@ -501,6 +514,26 @@
           <el-input type="text" :placeholder="$t('addResendTokenDesc')" v-model="resendTokenForm.token" @keyup.enter="saveResendToken"/>
           <el-button type="primary" :loading="settingLoading" @click="saveResendToken">{{ $t('save') }}</el-button>
         </form>
+      </el-dialog>
+      <el-dialog v-model="brevoTokenFormShow" title="Brevo Token" width="340" @closed="brevoTokenForm.token = ''">
+        <form @submit.prevent>
+          <el-select style="margin-bottom: 15px" v-model="brevoTokenForm.domain" placeholder="Select">
+            <el-option
+                v-for="item in settingStore.domainList"
+                :key="item"
+                :label="item"
+                :value="item"
+            />
+          </el-select>
+          <el-input type="text" placeholder="xkeysib-..." v-model="brevoTokenForm.token" @keyup.enter="saveBrevoToken"/>
+          <el-button type="primary" :loading="settingLoading" @click="saveBrevoToken">{{ $t('save') }}</el-button>
+        </form>
+      </el-dialog>
+      <el-dialog class="resend-table" v-model="showBrevoList" title="Brevo Token">
+        <el-table :data="brevoList">
+          <el-table-column property="key" :label="$t('domain')" :show-overflow-tooltip="true"/>
+          <el-table-column property="value" label="Token" fixed="right" :show-overflow-tooltip="true"/>
+        </el-table>
       </el-dialog>
       <el-dialog v-model="turnstileShow" :title="$t('addTurnstileSecret')" width="340"
                  @closed="turnstileForm.secretKey = '';turnstileForm.siteKey = ''">
@@ -944,6 +977,7 @@ const accountStore = useAccountStore();
 const userStore = useUserStore();
 const editTitleShow = ref(false)
 const resendTokenFormShow = ref(false)
+const brevoTokenFormShow = ref(false)
 const blackFormShow = ref(false)
 const autoCleanShow = ref(false)
 const aiCodeFilterShow = ref(false)
@@ -955,6 +989,7 @@ const webhookShow = ref(false)
 const forwardRulesShow = ref(false)
 const emailPrefixShow = ref(false)
 const showResendList = ref(false)
+const showBrevoList = ref(false)
 const settingStore = useSettingStore();
 const uiStore = useUiStore();
 const {settings: setting} = storeToRefs(settingStore);
@@ -976,6 +1011,10 @@ const addS3Show = ref(false)
 const addVerifyCountShow = ref(false)
 const regVerifyCountShow = ref(false)
 const resendTokenForm = reactive({
+  domain: '',
+  token: '',
+})
+const brevoTokenForm = reactive({
   domain: '',
   token: '',
 })
@@ -1147,6 +1186,15 @@ const resendList = computed(() => {
   }
 
   return list;
+});
+
+const brevoList = computed(() => {
+  return Object.keys(setting.value.brevoTokens || {}).map(key => {
+    return {
+      key: key,
+      value: setting.value.brevoTokens[key]
+    };
+  });
 });
 
 function getUpdate() {
@@ -1636,9 +1684,28 @@ function saveResendToken() {
   editSetting(settingForm)
 }
 
+function openBrevoForm() {
+  const domainList = setting.value.domainList || settingStore.domainList || []
+  if (!brevoTokenForm.domain && domainList.length > 0) {
+    brevoTokenForm.domain = domainList[0]
+  }
+  brevoTokenFormShow.value = true
+}
+
+function saveBrevoToken() {
+  const domain = brevoTokenForm.domain.slice(1)
+  editSetting({
+    brevoTokens: {
+      [domain]: brevoTokenForm.token
+    }
+  })
+  brevoTokenFormShow.value = false
+}
+
 function backupSetting() {
   const settingForm = {...setting.value}
   delete settingForm.resendTokens
+  delete settingForm.brevoTokens
   delete settingForm.siteKey
   delete settingForm.secretKey
   backup = JSON.stringify(setting.value)
@@ -1663,6 +1730,7 @@ function change(e) {
   delete settingForm.s3SecretKey
   delete settingForm.tgBotToken
   delete settingForm.resendTokens
+  delete settingForm.brevoTokens
   editSetting(settingForm, false)
 }
 
