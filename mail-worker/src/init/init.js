@@ -35,8 +35,26 @@ const dbInit = {
 		await this.v3_4DB(c);
 		await this.v3_5DB(c);
 		await this.v3_6DB(c);
+		await this.v3_7DB(c);
 		await settingService.refresh(c);
 		return c.text('success');
+	},
+
+	async v3_7DB(c) {
+		try {
+			await c.env.db.prepare(`ALTER TABLE email ADD COLUMN provider TEXT NOT NULL DEFAULT '';`).run();
+		} catch (e) {
+			console.warn(`跳过字段：${e.message}`);
+		}
+		// 历史发件记录按渠道 ID 形态回填：Brevo 返回 <xxx@smtp-relay...>，Resend 返回纯 uuid。
+		try {
+			await c.env.db.prepare(
+				`UPDATE email SET provider = CASE WHEN resend_email_id LIKE '<%@%' THEN 'brevo' ELSE 'resend' END
+				 WHERE provider = '' AND type = 1 AND resend_email_id IS NOT NULL AND resend_email_id != ''`
+			).run();
+		} catch (e) {
+			console.warn(`跳过回填：${e.message}`);
+		}
 	},
 
 	async v3_6DB(c) {

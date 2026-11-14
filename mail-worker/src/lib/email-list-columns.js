@@ -30,6 +30,7 @@ export const emailBriefColumns = {
 	toEmail: email.toEmail,
 	type: email.type,
 	status: email.status,
+	provider: email.provider,
 	message: email.message,
 	unread: email.unread,
 	createTime: email.createTime,

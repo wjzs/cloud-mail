@@ -610,7 +610,7 @@ const emailService = {
 			? sendParams.receiveEmail.map(address => [address])
 			: [sendParams.receiveEmail];
 		for (const receiveEmail of recipientGroups) {
-			const emailResult = await this.saveSentEmail(c, { ...saveParams, receiveEmail });
+			const emailResult = await this.saveSentEmail(c, { ...saveParams, receiveEmail, provider: 'internal' });
 			const inboxAddresses = [...receiveEmail, ...sendParams.ccEmail, ...sendParams.bccEmail];
 			const emailRowList = await this.HandleOnSiteEmail(c, inboxAddresses, emailResult, emailResult.attList);
 			await this.forwardOnSiteEmail(c, emailRowList, { sendParams: { ...sendParams, receiveEmail } });
@@ -634,7 +634,7 @@ const emailService = {
 				return;
 			}
 			const emailResult = await this.saveSentEmail(c, {
-				...saveParams, receiveEmail, providerId: result.data.id
+				...saveParams, receiveEmail, providerId: result.data.id, provider: 'cf'
 			});
 			yield { emails: [emailResult] };
 		}
@@ -672,7 +672,7 @@ const emailService = {
 		const emails = [];
 		for (const item of items) {
 			emails.push(await this.saveSentEmail(c, {
-				...saveParams, receiveEmail: item.receiveEmail, providerId: item.id
+				...saveParams, receiveEmail: item.receiveEmail, providerId: item.id, provider: 'resend'
 			}));
 		}
 		yield { emails };
@@ -700,7 +700,7 @@ const emailService = {
 				return;
 			}
 			const emailResult = await this.saveSentEmail(c, {
-				...saveParams, receiveEmail, providerId: result.data?.id
+				...saveParams, receiveEmail, providerId: result.data?.id, provider: 'brevo'
 			});
 			yield { emails: [emailResult] };
 		}
@@ -711,7 +711,7 @@ const emailService = {
 		const {
 			accountId, userId, name, subject, text, html, sendEmail, receiveEmail,
 			ccEmail = [], bccEmail = [],
-			providerId, messageId, sendType, useCloudflareEmail,
+			providerId, provider, messageId, sendType, useCloudflareEmail,
 			roleRow, r2Domain, attachments
 		} = params;
 		const imageDataList = params.imageDataList.map(item => ({
@@ -723,6 +723,7 @@ const emailService = {
 			status: useCloudflareEmail ? emailConst.status.DELIVERED : emailConst.status.SENT,
 			type: emailConst.type.SEND,
 			resendEmailId: providerId,
+			provider: provider || '',
 			recipient: JSON.stringify(receiveEmail.map(address => ({ address, name: '' }))),
 			cc: JSON.stringify(ccEmail.map(address => ({ address, name: '' }))),
 			bcc: JSON.stringify(bccEmail.map(address => ({ address, name: '' })))
