@@ -329,6 +329,44 @@ jobs:
             exit 1
           fi
 
+      - name: 🔎 Smoke test (API + SPA) with auto-rollback
+        if: always() && steps.deploy.outcome == 'success'
+        run: |
+          BASE="${CUSTOM_DOMAIN:+https://$CUSTOM_DOMAIN}"
+          BASE="${BASE:-${{ steps.deploy.outputs.worker_url }}}"
+          if [ -z "$BASE" ]; then
+            echo "::warning::No worker URL available for smoke test."
+            exit 0
+          fi
+
+          echo "Smoke testing $BASE"
+          API_CODE=$(curl -s -o api_body.txt -w "%{http_code}" --max-time 30 "$BASE/api/setting/websiteConfig" || echo "000")
+          SPA_CODE=$(curl -s -o spa_body.txt -w "%{http_code}" --max-time 30 "$BASE/__spa_probe__" || echo "000")
+          echo "GET /api/setting/websiteConfig -> $API_CODE"
+          echo "GET /__spa_probe__            -> $SPA_CODE"
+          head -c 200 api_body.txt; echo
+
+          if [ "$API_CODE" != "200" ]; then
+            echo "::error::API is not reachable (HTTP $API_CODE). Static assets are probably shadowing the Worker."
+            PREV="${{ steps.deploy.outputs.prev_version }}"
+            if [ -n "$PREV" ]; then
+              echo "⏪ Rolling back to $PREV"
+              curl -s -X POST \
+                "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${NAME}/deployments" \
+                -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "{\"strategy\":\"percentage\",\"versions\":[{\"version_id\":\"${PREV}\",\"percentage\":100}]}"
+              echo ""
+            fi
+            exit 1
+          fi
+
+          if [ "$SPA_CODE" != "200" ]; then
+            echo "::warning::SPA fallback returned $SPA_CODE (expected 200)."
+          fi
+
+          echo "✅ Smoke test passed."
+
       - name: 🗑️ Delete workflow runs
         uses: GitRML/delete-workflow-runs@main
         continue-on-error: true
