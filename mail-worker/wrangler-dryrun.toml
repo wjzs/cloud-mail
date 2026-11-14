@@ -1,0 +1,9 @@
+# 仅用于「同步上游后做本地打包校验」，不参与实际部署。
+# 用法：npx wrangler deploy --dry-run -c wrangler-dryrun.toml
+# 不写 assets / 绑定，避免本地没有 dist 时校验失败。
+name = "cloud-mail-dryrun"
+main = "src/index.js"
+compatibility_date = "2025-06-04"
+
+[observability]
+enabled = true

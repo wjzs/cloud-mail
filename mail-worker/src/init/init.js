@@ -34,18 +34,33 @@ const dbInit = {
 		await this.v3_3DB(c);
 		await this.v3_4DB(c);
 		await this.v3_5DB(c);
-		await this.v3_6DB(c);
-		await this.v3_7DB(c);
+		// [custom] 本站自有迁移，固定放在上游迁移链末尾，命名与 vX_YDB 隔离
+		await this.customMailDB(c);
 		await settingService.refresh(c);
 		return c.text('success');
 	},
 
-	async v3_7DB(c) {
-		try {
-			await c.env.db.prepare(`ALTER TABLE email ADD COLUMN provider TEXT NOT NULL DEFAULT '';`).run();
-		} catch (e) {
-			console.warn(`跳过字段：${e.message}`);
+	/**
+	 * [custom] 本站自有数据库迁移（上游没有这个函数）。
+	 * 命名刻意不用 vX_YDB，避免上游后续版本新增同号迁移时对象属性互相覆盖。
+	 * 全部语句都是 IF NOT EXISTS 语义外的 ALTER，靠 try/catch 实现幂等。
+	 */
+	async customMailDB(c) {
+		const steps = [
+			// 1. Brevo 发件密钥（按域名存 xkeysib- key）
+			`ALTER TABLE setting ADD COLUMN brevo_tokens TEXT NOT NULL DEFAULT '{}';`,
+			// 2. 发件渠道标识：internal / cf / brevo / resend
+			`ALTER TABLE email ADD COLUMN provider TEXT NOT NULL DEFAULT '';`
+		];
+
+		for (const sql of steps) {
+			try {
+				await c.env.db.prepare(sql).run();
+			} catch (e) {
+				console.warn(`跳过字段：${e.message}`);
+			}
 		}
+
 		// 历史发件记录按渠道 ID 形态回填：Brevo 返回 <xxx@smtp-relay...>，Resend 返回纯 uuid。
 		try {
 			await c.env.db.prepare(
@@ -54,14 +69,6 @@ const dbInit = {
 			).run();
 		} catch (e) {
 			console.warn(`跳过回填：${e.message}`);
-		}
-	},
-
-	async v3_6DB(c) {
-		try {
-			await c.env.db.prepare(`ALTER TABLE setting ADD COLUMN brevo_tokens TEXT NOT NULL DEFAULT '{}';`).run();
-		} catch (e) {
-			console.warn(`跳过字段：${e.message}`);
 		}
 	},
 
