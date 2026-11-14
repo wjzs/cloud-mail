@@ -206,11 +206,38 @@ jobs:
           sed -i "s|\${D1_DATABASE_ID}|$D1_ID|g" "$CONFIG_FILE"
           echo "✅ Setup completed."
 
+      - name: 🔍 Verify generated config (assets routing)
+        working-directory: ./mail-worker
+        run: |
+          echo "wrangler: $(pnpm wrangler --version 2>/dev/null | tail -1)"
+          echo "--- compatibility_date ---"
+          grep -E "^compatibility_date" wrangler-action.toml || echo "(missing)"
+          echo "--- [assets] section ---"
+          sed -n '/^\[assets\]/,/^$/p' wrangler-action.toml
+          if ! grep -qE '^run_worker_first *= *true' wrangler-action.toml; then
+            echo "::error::run_worker_first is missing from [assets]; API routes will be shadowed by static assets."
+            exit 1
+          fi
+          if ! grep -qE '^not_found_handling *= *"single-page-application"' wrangler-action.toml; then
+            echo "::error::not_found_handling is missing from [assets]; SPA fallback will break."
+            exit 1
+          fi
+          echo "✅ assets routing config OK"
+
       - name: 🚀 Start deployment
         id: deploy
         working-directory: ./mail-worker
         run: |
           echo "🚀 Starting deployment..."
+
+          # 记录部署前的线上版本，便于校验失败时回滚
+          PREV_VERSION=$(curl -s \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${NAME}/deployments" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            | jq -r '.result.deployments[0].versions[0].version_id // empty')
+          echo "prev_version=${PREV_VERSION}" >> $GITHUB_OUTPUT
+          echo "previous live version: ${PREV_VERSION:-none}"
+
           pnpm wrangler deploy -c wrangler-action.toml 2>&1 \
             | tee deploy.log \
             | grep -v "https://.*\.workers\.dev" \
@@ -229,7 +256,55 @@ jobs:
           fi
           
           echo "worker_url=$WORKER_URL" >> $GITHUB_OUTPUT
+
+          NEW_VERSION=$(grep -oE "Current Version ID: .*" deploy.log | awk '{print $NF}')
+          echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "new version: ${NEW_VERSION}"
           echo "✅ Setup completed."
+
+      - name: 🛡️ Verify assets routing (auto-rollback on failure)
+        id: verify
+        working-directory: ./mail-worker
+        run: |
+          NEW_VERSION="${{ steps.deploy.outputs.new_version }}"
+          if [ -z "$NEW_VERSION" ]; then
+            echo "::warning::Cannot determine deployed version id, skipping routing check."
+            exit 0
+          fi
+
+          curl -s \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${NAME}/versions/${NEW_VERSION}" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -o version.json
+
+          RWF=$(jq -r '.result.resources.script_runtime.assets.raw_run_worker_first // "null"' version.json)
+          NFH=$(jq -r '.result.resources.script_runtime.assets.not_found_handling // "null"' version.json)
+          COMPAT=$(jq -r '.result.compatibility_date // .result.resources.script_runtime.compatibility_date // "unknown"' version.json)
+
+          echo "deployed version: $NEW_VERSION"
+          echo "run_worker_first: $RWF"
+          echo "not_found_handling: $NFH"
+          echo "compatibility_date: $COMPAT"
+
+          if [ "$RWF" != "true" ] || [ "$NFH" != "single-page-application" ]; then
+            echo "::error::Assets routing is wrong (run_worker_first=$RWF, not_found_handling=$NFH). /api/* would be shadowed by static assets."
+            PREV="${{ steps.deploy.outputs.prev_version }}"
+            if [ -n "$PREV" ]; then
+              echo "⏪ Rolling back to previous version $PREV ..."
+              curl -s -X POST \
+                "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${NAME}/deployments" \
+                -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "{\"strategy\":\"percentage\",\"versions\":[{\"version_id\":\"${PREV}\",\"percentage\":100}]}"
+              echo ""
+              echo "✅ Rolled back. Service kept on the previous working version."
+            else
+              echo "::warning::No previous version available to roll back to."
+            fi
+            exit 1
+          fi
+
+          echo "✅ Assets routing verified."
 
       - name: ♻️ Initialize database
         run: |
